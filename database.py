@@ -37,7 +37,17 @@ class Database:
                     registration_date TIMESTAMP NOT NULL,
                     status TEXT DEFAULT 'pending',
                     admin_comment TEXT,
+                )
+            ''')
+
+            # НОВАЯ ТАБЛИЦА: Связь многие-ко-многим между командами и турнирами
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS team_tournaments (
+                    team_id INTEGER,
                     tournament_id INTEGER,
+                    status TEXT DEFAULT 'pending',
+                    PRIMARY KEY (team_id, tournament_id),
+                    FOREIGN KEY (team_id) REFERENCES teams (id),
                     FOREIGN KEY (tournament_id) REFERENCES tournaments (id)
                 )
             ''')
@@ -449,20 +459,15 @@ class Database:
     def get_team_by_id(self, team_id: int) -> Optional[Dict[str, Any]]:
         """
         Получить данные о команде по ее ID.
-        
-        Args:
-            team_id: ID команды
-            
-        Returns:
-            Словарь с данными команды или None, если команда не найдена
         """
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
-            # Получаем информацию о команде (включая tournament_id)
+            # Получаем информацию о команде
             cursor.execute('''
-                SELECT id, team_name, status, registration_date, admin_comment, captain_contact, tournament_id
+                SELECT id, team_name, status, registration_date, 
+                    admin_comment, captain_contact
                 FROM teams
                 WHERE id = ?
             ''', (team_id,))
@@ -473,30 +478,28 @@ class Database:
             
             # Получаем список игроков
             cursor.execute('''
-                SELECT id, nickname, telegram_username, telegram_id, discord_username, discord_id, is_captain
+                SELECT id, nickname, telegram_username, telegram_id, 
+                    discord_username, discord_id, is_captain
                 FROM players
                 WHERE team_id = ?
             ''', (team_id,))
             
             players = cursor.fetchall()
             
+            # Получаем все турниры, на которые зарегистрирована команда
+            cursor.execute('''
+                SELECT t.id, t.name, t.event_date, tt.status as registration_status
+                FROM tournaments t
+                JOIN team_tournaments tt ON t.id = tt.tournament_id
+                WHERE tt.team_id = ?
+            ''', (team_id,))
+            
+            tournaments = cursor.fetchall()
+            
             team_dict = dict(team)
-            
-            # Если у команды есть турнир, получаем информацию о нём
-            if team_dict['tournament_id']:
-                cursor.execute('''
-                    SELECT name, event_date
-                    FROM tournaments
-                    WHERE id = ?
-                ''', (team_dict['tournament_id'],))
-                
-                tournament = cursor.fetchone()
-                if tournament:
-                    team_dict['tournament_name'] = tournament['name']
-                    team_dict['tournament_date'] = tournament['event_date']
-            
-            # Форматируем результат
             team_dict['players'] = [dict(p) for p in players]
+            team_dict['tournaments'] = [dict(t) for t in tournaments]
+            
             return team_dict
 
     def get_team_by_telegram_id(self, telegram_id: int) -> Optional[Dict[str, Any]]:
@@ -618,14 +621,7 @@ class Database:
 
     def register_team_for_tournament(self, team_id: int, tournament_id: int) -> bool:
         """
-        Зарегистрировать команду на турнир.
-        
-        Args:
-            team_id: ID команды
-            tournament_id: ID турнира
-            
-        Returns:
-            True в случае успеха, иначе False
+        Регистрирует команду на турнир.
         """
         try:
             with sqlite3.connect(self.db_file) as conn:
@@ -656,39 +652,66 @@ class Database:
                 player_count = cursor.fetchone()[0]
                 
                 if player_count < 4:  # Минимум 4 игрока (3 + капитан)
-                    raise ValueError(f"Для регистрации необходимо минимум 4 игрока (включая капитана)")
+                    raise ValueError("Для регистрации необходимо минимум 4 игрока (включая капитана)")
                 
-                # Обновляем статус команды и привязываем к турниру
+                # Проверяем, не зарегистрирована ли уже команда на этот турнир
                 cursor.execute('''
-                    UPDATE teams 
-                    SET status = ?, tournament_id = ? 
-                    WHERE id = ?
-                ''', ('pending', tournament_id, team_id))
+                    SELECT 1 FROM team_tournaments 
+                    WHERE team_id = ? AND tournament_id = ?
+                ''', (team_id, tournament_id))
                 
-                # Обновляем статистику
-                today = datetime.now().date()
-                cursor.execute(
-                    'SELECT id FROM stats WHERE date(date) = date(?)', 
-                    (today.isoformat(),)
-                )
+                if cursor.fetchone():
+                    raise ValueError("Команда уже зарегистрирована на этот турнир")
+                    
+                # Добавляем запись в team_tournaments
+                cursor.execute('''
+                    INSERT INTO team_tournaments (team_id, tournament_id, status)
+                    VALUES (?, ?, ?)
+                ''', (team_id, tournament_id, 'pending'))
                 
-                stat_id = cursor.fetchone()
-                if stat_id:
-                    cursor.execute(
-                        'UPDATE stats SET registrations_count = registrations_count + 1 WHERE id = ?',
-                        (stat_id[0],)
-                    )
-                else:
-                    cursor.execute(
-                        'INSERT INTO stats (date, registrations_count) VALUES (?, 1)',
-                        (datetime.now(),)
-                    )
+                # Обновляем статус команды
+                cursor.execute('UPDATE teams SET status = ? WHERE id = ?', ('pending', team_id))
+                
+                conn.commit()
+                return True
+                
+        except Exception as e:
+            logger.error(f"Ошибка при регистрации команды на турнир: {e}")
+            raise ValueError(str(e))
+        
+    def register_team_for_multiple_tournaments(self, team_id: int, tournament_ids: List[int]) -> bool:
+        """Регистрация команды на несколько турниров."""
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+                
+                for tournament_id in tournament_ids:
+                    # Проверки как в существующем методе register_team_for_tournament
+                    cursor.execute('''
+                        INSERT INTO team_tournaments (team_id, tournament_id, status)
+                        VALUES (?, ?, ?)
+                    ''', (team_id, tournament_id, 'pending'))
                 
                 conn.commit()
                 return True
         except Exception as e:
-            logger.error(f"Ошибка при регистрации команды на турнир: {e}")
-            raise ValueError(str(e))
+            logger.error(f"Ошибка при регистрации команды на турниры: {e}")
+            return False
+
+    def get_team_tournaments(self, team_id: int) -> List[Dict[str, Any]]:
+        """Получить список турниров, на которые зарегистрирована команда."""
+        with sqlite3.connect(self.db_file) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT t.*, tt.status as registration_status
+                FROM tournaments t
+                JOIN team_tournaments tt ON t.id = tt.tournament_id
+                WHERE tt.team_id = ?
+            ''', (team_id,))
+            
+            return [dict(tournament) for tournament in cursor.fetchall()]
 
     def create_team(self, team_name: str, captain: Dict[str, Any]) -> int:
         """
@@ -1235,34 +1258,37 @@ class Database:
     def get_all_teams(self, status: Optional[str] = None, tournament_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         Получить список всех команд с опциональной фильтрацией по статусу и турниру.
-        
-        Args:
-            status: Фильтр по статусу (опционально)
-            tournament_id: Фильтр по ID турнира (опционально)
-            
-        Returns:
-            Список словарей с данными команд
         """
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
             query = '''
-                SELECT t.id, t.team_name, t.status, t.registration_date, 
-                    t.captain_contact, t.admin_comment, t.tournament_id
+                SELECT DISTINCT t.id, t.team_name, t.status, t.registration_date, 
+                    t.captain_contact, t.admin_comment
                 FROM teams t
-                WHERE 1=1
             '''
             
             params = []
-            if status:
-                query += ' AND t.status = ?'
-                params.append(status)
             
+            # Если указан турнир, добавляем JOIN с team_tournaments
             if tournament_id:
-                query += ' AND t.tournament_id = ?'
+                query += '''
+                    JOIN team_tournaments tt ON t.id = tt.team_id
+                    WHERE tt.tournament_id = ?
+                '''
                 params.append(tournament_id)
-            
+                
+                # Если указан статус, проверяем его в team_tournaments
+                if status:
+                    query += ' AND tt.status = ?'
+                    params.append(status)
+            else:
+                # Если турнир не указан, проверяем общий статус команды
+                if status:
+                    query += ' WHERE t.status = ?'
+                    params.append(status)
+                    
             query += ' ORDER BY t.registration_date DESC'
             
             cursor.execute(query, params)
@@ -1273,29 +1299,26 @@ class Database:
                 
                 # Получаем игроков для каждой команды
                 cursor.execute('''
-                    SELECT id, nickname, telegram_username, telegram_id, discord_username, discord_id, is_captain
+                    SELECT id, nickname, telegram_username, telegram_id, 
+                        discord_username, discord_id, is_captain
                     FROM players
                     WHERE team_id = ?
                 ''', (team['id'],))
                 
-                players = [dict(p) for p in cursor.fetchall()]
-                team_dict['players'] = players
+                team_dict['players'] = [dict(p) for p in cursor.fetchall()]
                 
-                # Если у команды есть турнир, получаем информацию о нём
-                if team_dict['tournament_id']:
-                    cursor.execute('''
-                        SELECT name, event_date
-                        FROM tournaments
-                        WHERE id = ?
-                    ''', (team_dict['tournament_id'],))
-                    
-                    tournament = cursor.fetchone()
-                    if tournament:
-                        team_dict['tournament_name'] = tournament['name']
-                        team_dict['tournament_date'] = tournament['event_date']
+                # Получаем турниры для команды
+                cursor.execute('''
+                    SELECT t.id, t.name, t.event_date, tt.status as registration_status
+                    FROM tournaments t
+                    JOIN team_tournaments tt ON t.id = tt.tournament_id
+                    WHERE tt.team_id = ?
+                ''', (team['id'],))
+                
+                team_dict['tournaments'] = [dict(t) for t in cursor.fetchall()]
                 
                 teams.append(team_dict)
-            
+                
             return teams
 
     def is_admin(self, telegram_id: int) -> bool:
