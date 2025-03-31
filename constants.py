@@ -56,8 +56,12 @@
     TEAM_CREATE_CAPTAIN_DISCORD,
     TEAM_ADD_PLAYER_DISCORD,
     TEAM_EDIT_PLAYER_DISCORD,
+
+    # Новые состояния для множественной регистрации на турниры
+    TOURNAMENT_SELECTION,
+    TOURNAMENT_CONFIRMATION,
     
-) = range(41)  # Обновлено общее количество состояний
+) = range(43)  # Обновлено общее количество состояний
 
 # ID канала для проверки подписки
 CHANNEL_ID = "@pubgruprime"
