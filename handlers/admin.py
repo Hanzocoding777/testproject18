@@ -262,175 +262,301 @@ async def admin_tournament_status_teams(update: Update, context: ContextTypes.DE
     )
 
 async def show_team_info(update: Update, context: ContextTypes.DEFAULT_TYPE, team_id: int) -> None:
-    """Показать информацию о конкретной команде."""
-    query = update.callback_query
-    
-    db = context.bot_data["db"]
-    if not db.is_admin(query.from_user.id):
-        await query.edit_message_text("У вас нет доступа к этой функции.")
-        return
-    
-    # Получаем информацию о команде
-    teams = db.get_all_teams()
-    team = next((t for t in teams if t["id"] == team_id), None)
-    
-    if not team:
-        await query.edit_message_text(
-            "❌ Команда не найдена.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Назад", callback_data="admin_teams_list")
-            ]])
-        )
-        return
-    
-    # Определяем кнопки в зависимости от статуса команды
-    keyboard = []
-    
-    if team["status"] == "pending":
-        keyboard.append([
-            InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_team_{team_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_team_{team_id}")
-        ])
-    elif team["status"] == "approved":
-        keyboard.append([
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_team_{team_id}"),
-            InlineKeyboardButton("🗑️ Удалить", callback_data=f"delete_team_{team_id}")
-        ])
-    elif team["status"] == "rejected":
-        keyboard.append([
-            InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_team_{team_id}"),
-            InlineKeyboardButton("🗑️ Удалить", callback_data=f"delete_team_{team_id}")
-        ])
-    
-    keyboard.append([InlineKeyboardButton("💬 Комментарий", callback_data=f"comment_team_{team_id}")])
-    
-    # Добавляем кнопку "Назад к списку"
-    if team["status"] == "pending":
-        back_data = "admin_teams_pending"
-    elif team["status"] == "approved":
-        back_data = "admin_teams_approved"
-    elif team["status"] == "rejected":
-        back_data = "admin_teams_rejected"
-    else:
-        back_data = "admin_teams_list"
-    
-    keyboard.append([InlineKeyboardButton("◀️ Назад к списку", callback_data=back_data)])
-    
-    # Формируем список игроков со ссылками на статистику
-    players_list = ""
-    captain = None
-    
-    for player in team["players"]:
-        stat_url = f"https://pubg.op.gg/user/{player['nickname']}"
-        stat_button = f"<a href='{stat_url}'>📊</a>"
-        discord_info = f" [Discord: {player.get('discord_username', 'Не указан')}]" if player.get('discord_username') else ""
-        
-        if player.get("is_captain", False) or (isinstance(player, tuple) and len(player) > 2 and player[2]):
-            if isinstance(player, dict):
-                captain = f"• {player['nickname']} – @{player['telegram_username']} (Капитан) {discord_info} {stat_button}"
-            else:
-                captain = f"• {player[0]} – @{player[1]} (Капитан) {discord_info} {stat_button}"
-        else:
-            if isinstance(player, dict):
-                player_info = f"• {player['nickname']} – @{player['telegram_username']} {discord_info} {stat_button}"
-            else:
-                player_info = f"• {player[0]} – @{player[1]} {discord_info} {stat_button}"
-            players_list += f"{player_info}\n"
-    
-    # Добавляем капитана в начало списка
-    if captain:
-        players_list = f"{captain}\n\n{players_list}"
-    
-    # Строим сообщение с информацией о команде
-    message = (
-        f"🎮 <b>Команда:</b> {team['team_name']}\n"
-        f"📅 <b>Дата регистрации:</b> {team['registration_date']}\n"
-        f"📱 <b>Контакт капитана:</b> {team['captain_contact']}\n"
-        f"📊 <b>Статус:</b> {TEAM_STATUS.get(team['status'], 'Неизвестно')}\n"
-        f"💭 <b>Комментарий:</b> {team['admin_comment'] or 'Нет'}\n\n"
-        f"👥 <b>Игроки:</b>\n{players_list}"
-    )
-    
-    # Отправляем сообщение с информацией о команде
-    await query.edit_message_text(
-        message,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML",
-        disable_web_page_preview=True  # Отключаем предпросмотр ссылок
-    )
+   """Показать информацию о конкретной команде."""
+   query = update.callback_query
+   
+   db = context.bot_data["db"]
+   if not db.is_admin(query.from_user.id):
+       await query.edit_message_text("У вас нет доступа к этой функции.")
+       return
+   
+   # Получаем информацию о команде
+   teams = db.get_all_teams()
+   team = next((t for t in teams if t["id"] == team_id), None)
+   
+   if not team:
+       await query.edit_message_text(
+           "❌ Команда не найдена.",
+           reply_markup=InlineKeyboardMarkup([[
+               InlineKeyboardButton("◀️ Назад", callback_data="admin_teams_list")
+           ]])
+       )
+       return
+   
+   # Определяем кнопки в зависимости от статусов команды в турнирах
+   keyboard = []
+   tournaments = team.get("tournaments", [])
+   
+   # Если у команды нет турниров и она в статусе draft
+   if not tournaments and team["status"] == "draft":
+       keyboard.append([
+           InlineKeyboardButton("💬 Комментарий", callback_data=f"comment_team_{team_id}"),
+           InlineKeyboardButton("🗑️ Удалить", callback_data=f"delete_team_{team_id}")
+       ])
+   else:
+       # Добавляем кнопки для каждого турнира
+       for tournament in tournaments:
+           tournament_id = tournament["id"]
+           tournament_name = tournament["name"]
+           status = tournament["registration_status"]
+           
+           # Формируем заголовок для группы кнопок турнира
+           tournament_buttons = []
+           
+           if status == "pending":
+               tournament_buttons = [
+                   [
+                       InlineKeyboardButton(
+                           f"🏆 {tournament_name}",
+                           callback_data=f"view_tournament_{tournament_id}"
+                       )
+                   ],
+                   [
+                       InlineKeyboardButton(
+                           "✅ Одобрить",
+                           callback_data=f"approve_team_{team_id}_{tournament_id}"
+                       ),
+                       InlineKeyboardButton(
+                           "❌ Отклонить",
+                           callback_data=f"reject_team_{team_id}_{tournament_id}"
+                       )
+                   ]
+               ]
+           elif status == "approved":
+               tournament_buttons = [
+                   [
+                       InlineKeyboardButton(
+                           f"🏆 {tournament_name}",
+                           callback_data=f"view_tournament_{tournament_id}"
+                       )
+                   ],
+                   [
+                       InlineKeyboardButton(
+                           "❌ Отклонить",
+                           callback_data=f"reject_team_{team_id}_{tournament_id}"
+                       )
+                   ]
+               ]
+           elif status == "rejected":
+               tournament_buttons = [
+                   [
+                       InlineKeyboardButton(
+                           f"🏆 {tournament_name}",
+                           callback_data=f"view_tournament_{tournament_id}"
+                       )
+                   ],
+                   [
+                       InlineKeyboardButton(
+                           "✅ Одобрить",
+                           callback_data=f"approve_team_{team_id}_{tournament_id}"
+                       )
+                   ]
+               ]
+           
+           keyboard.extend(tournament_buttons)
+           keyboard.append([InlineKeyboardButton("⎯" * 20, callback_data="separator")])
+
+   # Добавляем общие кнопки управления
+   keyboard.append([InlineKeyboardButton("💬 Комментарий", callback_data=f"comment_team_{team_id}")])
+   keyboard.append([InlineKeyboardButton("🗑️ Удалить команду", callback_data=f"delete_team_{team_id}")])
+
+   # Добавляем кнопку "Назад к списку"
+   keyboard.append([InlineKeyboardButton("◀️ Назад к списку", callback_data="admin_teams_list")])
+   
+   # Формируем сообщение с информацией о команде
+   message = (
+       f"🎮 <b>Команда:</b> {team['team_name']}\n"
+       f"📅 <b>Дата регистрации:</b> {team['registration_date']}\n"
+       f"📱 <b>Контакт капитана:</b> {team['captain_contact']}\n"
+       f"📊 <b>Общий статус:</b> {TEAM_STATUS.get(team['status'], 'Неизвестно')}\n"
+   )
+
+   # Добавляем информацию о турнирах
+   if tournaments:
+       message += "\n🏆 <b>Участие в турнирах:</b>\n"
+       for tournament in tournaments:
+           status_emoji = "⏳" if tournament["registration_status"] == "pending" else "✅" if tournament["registration_status"] == "approved" else "❌"
+           message += (
+               f"\n• {status_emoji} <b>{tournament['name']}</b>\n"
+               f"  📅 Дата: {tournament['event_date']}\n"
+               f"  📊 Статус: {TEAM_STATUS.get(tournament['registration_status'], 'Неизвестно')}\n"
+           )
+   
+   if team['admin_comment']:
+       message += f"\n💭 <b>Комментарий:</b> {team['admin_comment']}\n"
+   
+   # Формируем список игроков
+   message += "\n👥 <b>Игроки:</b>\n"
+   captain = None
+   players_list = ""
+   
+   for player in team["players"]:
+       discord_info = f" [Discord: {player.get('discord_username', 'Не указан')}]" if player.get('discord_username') else ""
+       stat_url = f"https://pubg.op.gg/user/{player['nickname']}"
+       stat_button = f"<a href='{stat_url}'>📊</a>"
+       
+       if player.get("is_captain", False):
+           captain = f"• {player['nickname']} – @{player['telegram_username']} (Капитан) {discord_info} {stat_button}"
+       else:
+           players_list += f"• {player['nickname']} – @{player['telegram_username']} {discord_info} {stat_button}\n"
+   
+   # Добавляем капитана в начало списка
+   if captain:
+       message += f"{captain}\n\n{players_list}"
+   else:
+       message += players_list
+   
+   # Отправляем сообщение
+   await query.edit_message_text(
+       message,
+       reply_markup=InlineKeyboardMarkup(keyboard),
+       parse_mode="HTML",
+       disable_web_page_preview=True
+   )
 
 async def handle_team_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработка действий с командами."""
-    query = update.callback_query
-    await query.answer()
-    
-    db = context.bot_data["db"]
-    discord_bot = context.bot_data.get("discord_bot")
-    discord_server_id = context.bot_data.get("discord_server_id")
-    discord_role_id = context.bot_data.get("discord_role_id")
-    discord_captain_role_id = context.bot_data.get("discord_captain_role_id")
-    
-    if not db.is_admin(query.from_user.id):
-        await query.edit_message_text("У вас нет доступа к этой функции.")
-        return
+   """Обработка действий с командами."""
+   query = update.callback_query
+   await query.answer()
+   
+   db = context.bot_data["db"]
+   discord_bot = context.bot_data.get("discord_bot")
+   discord_server_id = context.bot_data.get("discord_server_id")
+   discord_role_id = context.bot_data.get("discord_role_id")
+   discord_captain_role_id = context.bot_data.get("discord_captain_role_id")
+   
+   if not db.is_admin(query.from_user.id):
+       await query.edit_message_text("У вас нет доступа к этой функции.")
+       return
 
-    action, entity_type, entity_id = query.data.split("_")
-    entity_id = int(entity_id)
-    
-    if entity_type == "team":
-        if action == "approve":
-            # Получаем текущий статус команды
-            team = db.get_team_by_id(entity_id)
-            old_status = team["status"] if team else None
-            
-            if db.update_team_status(entity_id, "approved"):
-                # После успешного обновления статуса, выдаем роли игрокам
-                await process_team_roles(db, discord_bot, discord_server_id, discord_role_id, 
-                                         discord_captain_role_id, entity_id, old_status, "approved")
-                
-                # Возвращаемся к информации о команде
-                await query.answer("✅ Команда одобрена!")
-                await show_team_info(update, context, entity_id)
-            else:
-                await query.answer("❌ Ошибка при обновлении статуса команды.")
-        
-        elif action == "reject":
-            # Получаем текущий статус команды
-            team = db.get_team_by_id(entity_id)
-            old_status = team["status"] if team else None
-            
-            if db.update_team_status(entity_id, "rejected"):
-                # После успешного обновления статуса, удаляем роли у игроков, если они были одобрены ранее
-                await process_team_roles(db, discord_bot, discord_server_id, discord_role_id, 
-                                         discord_captain_role_id, entity_id, old_status, "rejected")
-                
-                # Возвращаемся к информации о команде
-                await query.answer("❌ Команда отклонена!")
-                await show_team_info(update, context, entity_id)
-            else:
-                await query.answer("❌ Ошибка при обновлении статуса команды.")
-        
-        elif action == "comment":
-            context.user_data["commenting_team"] = entity_id
-            await query.message.reply_text(
-                "💬 Введите комментарий для команды:",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("Отмена", callback_data="cancel_comment")
-                ]])
-            )
-            return ADMIN_COMMENTING
-            
-        elif action == "delete":
-            # Запрашиваем подтверждение перед удалением
-            await query.edit_message_text(
-                "⚠️ Вы уверены, что хотите удалить эту команду? Это действие нельзя отменить.",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_delete_{entity_id}"),
-                        InlineKeyboardButton("❌ Нет, отмена", callback_data=f"admin_teams_team_{entity_id}")
-                    ]
-                ])
-            )
+   # Парсим callback_data
+   parts = query.data.split("_")
+   action = parts[0]
+   entity_type = parts[1]
+   team_id = int(parts[2])
+   tournament_id = int(parts[3]) if len(parts) > 3 else None
+   
+   if entity_type == "team":
+       if action == "approve":
+           # Получаем текущий статус команды и турнира
+           team = db.get_team_by_id(team_id)
+           old_status = None
+           
+           if tournament_id:
+               for t in team.get("tournaments", []):
+                   if t["id"] == tournament_id:
+                       old_status = t["registration_status"]
+                       break
+           
+           try:
+               # Обновляем статус в team_tournaments
+               if tournament_id:
+                   success = db.update_team_tournament_status(team_id, tournament_id, "approved")
+               else:
+                   success = db.update_team_status(team_id, "approved")
+               
+               if success:
+                   # После успешного обновления статуса, выдаем роли игрокам
+                   await process_team_roles(
+                       db, discord_bot, discord_server_id, discord_role_id,
+                       discord_captain_role_id, team_id, old_status, "approved",
+                       tournament_id=tournament_id
+                   )
+                   
+                   await query.answer("✅ Команда одобрена!")
+                   await show_team_info(update, context, team_id)
+               else:
+                   await query.answer("❌ Ошибка при обновлении статуса команды.")
+                   
+           except Exception as e:
+               logger.error(f"Ошибка при одобрении команды: {e}")
+               await query.answer("❌ Произошла ошибка при обработке запроса.")
+       
+       elif action == "reject":
+           # Получаем текущий статус команды и турнира
+           team = db.get_team_by_id(team_id)
+           old_status = None
+           
+           if tournament_id:
+               for t in team.get("tournaments", []):
+                   if t["id"] == tournament_id:
+                       old_status = t["registration_status"]
+                       break
+           
+           try:
+               # Обновляем статус в team_tournaments
+               if tournament_id:
+                   success = db.update_team_tournament_status(team_id, tournament_id, "rejected")
+               else:
+                   success = db.update_team_status(team_id, "rejected")
+               
+               if success:
+                   # После успешного обновления статуса, удаляем роли у игроков
+                   await process_team_roles(
+                       db, discord_bot, discord_server_id, discord_role_id,
+                       discord_captain_role_id, team_id, old_status, "rejected",
+                       tournament_id=tournament_id
+                   )
+                   
+                   await query.answer("❌ Команда отклонена!")
+                   await show_team_info(update, context, team_id)
+               else:
+                   await query.answer("❌ Ошибка при обновлении статуса команды.")
+                   
+           except Exception as e:
+               logger.error(f"Ошибка при отклонении команды: {e}")
+               await query.answer("❌ Произошла ошибка при обработке запроса.")
+       
+       elif action == "comment":
+           context.user_data["commenting_team"] = team_id
+           await query.message.reply_text(
+               "💬 Введите комментарий для команды:",
+               reply_markup=InlineKeyboardMarkup([[
+                   InlineKeyboardButton("Отмена", callback_data="cancel_comment")
+               ]])
+           )
+           return ADMIN_COMMENTING
+           
+       elif action == "delete":
+           # Запрашиваем подтверждение перед удалением
+           await query.edit_message_text(
+               "⚠️ Вы уверены, что хотите удалить эту команду? Это действие нельзя отменить.",
+               reply_markup=InlineKeyboardMarkup([
+                   [
+                       InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_delete_{team_id}"),
+                       InlineKeyboardButton("❌ Нет, отмена", callback_data=f"admin_teams_team_{team_id}")
+                   ]
+               ])
+           )
+       
+       elif action == "view_tournament":
+           # Показываем информацию о турнире
+           tournament = db.get_tournament_by_id(tournament_id)
+           if tournament:
+               teams = db.get_all_teams(tournament_id=tournament_id)
+               message = (
+                   f"🏆 <b>{tournament['name']}</b>\n\n"
+                   f"📅 Дата проведения: {tournament['event_date']}\n"
+                   f"👥 Количество команд: {len(teams)}\n\n"
+                   f"Описание:\n{tournament['description']}"
+               )
+               
+               keyboard = [
+                   [InlineKeyboardButton("🔙 Назад к команде", callback_data=f"admin_teams_team_{team_id}")],
+                   [InlineKeyboardButton("📋 Список команд турнира", callback_data=f"admin_tournament_teams_{tournament_id}")]
+               ]
+               
+               await query.edit_message_text(
+                   message,
+                   reply_markup=InlineKeyboardMarkup(keyboard),
+                   parse_mode="HTML"
+               )
+           else:
+               await query.answer("❌ Турнир не найден")
+               
+   else:
+       await query.answer(f"Неизвестное действие: {action}")
+       logger.warning(f"Неизвестное действие в handle_team_action: {action}")
 
 async def confirm_delete_team(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Подтверждение удаления команды."""
