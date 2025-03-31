@@ -246,7 +246,7 @@ async def view_team(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     
     return PROFILE_MENU
 
-async def format_team_info(team, is_captain=False) -> str:
+async def format_team_info(team: Dict[str, Any], is_captain: bool = False) -> str:
     """
     Форматирует информацию о команде для отображения.
     
@@ -261,11 +261,7 @@ async def format_team_info(team, is_captain=False) -> str:
     status_text = TEAM_STATUS.get(team["status"], "Неизвестно")
     
     # Находим капитана
-    captain = None
-    for player in team["players"]:
-        if player.get("is_captain", False):
-            captain = player
-            break
+    captain = next((p for p in team["players"] if p.get("is_captain", False)), None)
     
     # Формируем список всех игроков, начиная с капитана
     all_players = []
@@ -289,18 +285,27 @@ async def format_team_info(team, is_captain=False) -> str:
         "🎮 <b>Информация о команде:</b>\n\n"
         f"🏷️ <b>Название команды:</b> {team['team_name']}\n"
         f"📅 <b>Дата создания:</b> {team['registration_date']}\n"
-        f"📊 <b>Статус:</b> {status_text}\n"
+        f"📊 <b>Общий статус:</b> {status_text}\n"
     )
     
-    # Добавляем информацию о турнире, если есть
-    if team.get("tournament_id") and team.get("tournament_name"):
-        message += f"🏆 <b>Зарегистрирована на турнир:</b> {team['tournament_name']}\n"
-        if team.get("tournament_date"):
-            message += f"📆 <b>Дата проведения турнира:</b> {team['tournament_date']}\n"
+    # Добавляем информацию о турнирах
+    if team.get("tournaments"):
+        message += "\n🏆 <b>Участие в турнирах:</b>\n"
+        for tournament in team["tournaments"]:
+            tournament_status = TEAM_STATUS.get(tournament["registration_status"], "Неизвестно")
+            status_emoji = "⏳" if tournament["registration_status"] == "pending" else "✅" if tournament["registration_status"] == "approved" else "❌"
+            
+            message += (
+                f"\n• {status_emoji} <b>{tournament['name']}</b>\n"
+                f"  📅 Дата проведения: {tournament['event_date']}\n"
+                f"  📊 Статус заявки: {tournament_status}\n"
+            )
+    elif team["status"] == "draft":
+        message += "\n📝 <i>Команда пока не зарегистрирована ни на один турнир</i>\n"
     
     # Добавляем контактные данные капитана, если они указаны
     if team.get("captain_contact"):
-        message += f"📱 <b>Контакт капитана:</b> {team['captain_contact']}\n"
+        message += f"\n📱 <b>Контакт капитана:</b> {team['captain_contact']}\n"
     
     # Добавляем информацию о капитане
     if captain:
@@ -313,7 +318,7 @@ async def format_team_info(team, is_captain=False) -> str:
         message += f"\n💬 <b>Комментарий администратора:</b>\n{team['admin_comment']}\n"
     
     # Добавляем список игроков
-    message += f"<b>Игроки команды:</b>\n\n{players_list}"
+    message += f"\n👥 <b>Игроки команды:</b>\n\n{players_list}"
     
     # Дополнительная информация для капитана
     if is_captain:
@@ -324,20 +329,19 @@ async def format_team_info(team, is_captain=False) -> str:
                 f"Максимум разрешено {MAX_PLAYERS + 1} игроков (включая капитана).\n\n"
                 "Нажмите на игрока, чтобы редактировать его данные или нажмите кнопку \"Добавить игрока\"."
             )
-        elif team["status"] == "pending":
+        elif any(t["registration_status"] == "pending" for t in team.get("tournaments", [])):
             message += (
-                "\n⏳ <b>Заявка на участие в турнире подана.</b>\n"
-                "Ожидается подтверждение от администраторов турнира."
+                "\n⏳ <b>Внимание:</b> У вас есть заявки, ожидающие рассмотрения.\n"
+                "Ожидайте подтверждения от администраторов турнира."
             )
-        elif team["status"] == "approved":
+        
+        # Добавляем информацию о возможности регистрации на дополнительные турниры
+        active_registrations = sum(1 for t in team.get("tournaments", []) 
+                                 if t["registration_status"] in ["pending", "approved"])
+        if active_registrations > 0:
             message += (
-                "\n✅ <b>Команда одобрена для участия в турнире!</b>\n"
-                "Ожидайте дальнейших инструкций от организаторов."
-            )
-        elif team["status"] == "rejected":
-            message += (
-                "\n❌ <b>Заявка отклонена.</b>\n"
-                "Вы можете создать новую команду или связаться с администратором."
+                f"\n📊 <b>Активные регистрации:</b> {active_registrations}\n"
+                "Вы можете зарегистрироваться на дополнительные турниры."
             )
     
     return message
@@ -894,7 +898,7 @@ async def process_player_discord(update: Update, context: ContextTypes.DEFAULT_T
         return TEAM_ADD_PLAYER_USERNAME
 
 async def register_team_for_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Начать процесс регистрации команды на турнир."""
+    """Начать процесс регистрации команды на турниры."""
     query = update.callback_query
     await query.answer()
     
@@ -933,46 +937,186 @@ async def register_team_for_tournament(update: Update, context: ContextTypes.DEF
             ]])
         )
         return PROFILE_MENU
+
+    # Инициализируем список выбранных турниров в контексте
+    context.user_data['selected_tournaments'] = set()
     
-    # Проверяем наличие Discord у всех игроков
-    players_without_discord = [p for p in team["players"] if not p.get("discord_username")]
-    
-    if players_without_discord:
-        players_list = "\n".join([f"- {p['nickname']} (@{p['telegram_username']})" for p in players_without_discord])
+    # Создаем клавиатуру со списком турниров
+    keyboard = []
+    for tournament in active_tournaments:
+        # Проверяем, не зарегистрирована ли уже команда на этот турнир
+        is_registered = any(t['id'] == tournament['id'] for t in team.get('tournaments', []))
         
+        if not is_registered:
+            status = "✅" if tournament['id'] in context.user_data['selected_tournaments'] else "⭕️"
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{status} {tournament['name']} ({tournament['event_date']})",
+                    callback_data=f"select_tournament_{tournament['id']}"
+                )
+            ])
+    
+    # Добавляем кнопки управления
+    control_buttons = []
+    if context.user_data['selected_tournaments']:
+        control_buttons.append(
+            InlineKeyboardButton("✅ Подтвердить выбор", callback_data="confirm_tournaments")
+        )
+    control_buttons.append(
+        InlineKeyboardButton("❌ Отмена", callback_data=f"view_team_{team_id}")
+    )
+    keyboard.append(control_buttons)
+    
+    await query.edit_message_text(
+        "🏆 <b>Выберите турниры для регистрации</b>\n\n"
+        "Нажмите на турнир, чтобы выбрать/отменить выбор.\n"
+        "Вы можете выбрать несколько турниров.\n\n"
+        "Доступные турниры:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+    
+    return PROFILE_MENU
+
+async def handle_tournament_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработать выбор турнира."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Получаем ID турнира из callback_data
+    tournament_id = int(query.data.split("_")[2])
+    
+    # Инициализируем список выбранных турниров, если его еще нет
+    if 'selected_tournaments' not in context.user_data:
+        context.user_data['selected_tournaments'] = set()
+    
+    # Переключаем выбор турнира
+    if tournament_id in context.user_data['selected_tournaments']:
+        context.user_data['selected_tournaments'].remove(tournament_id)
+    else:
+        context.user_data['selected_tournaments'].add(tournament_id)
+    
+    # Обновляем сообщение с обновленным статусом выбора
+    return await register_team_for_tournament(update, context)
+
+async def confirm_tournaments_registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Подтвердить регистрацию на выбранные турниры."""
+    query = update.callback_query
+    await query.answer()
+    
+    team_id = context.user_data.get("current_team_id")
+    selected_tournaments = context.user_data.get('selected_tournaments', set())
+    
+    if not selected_tournaments:
         await query.edit_message_text(
-            f"⚠️ Для регистрации на турнир все игроки должны иметь указанный Discord username.\n\n"
-            f"Следующие игроки не имеют Discord:\n{players_list}\n\n"
-            f"Пожалуйста, отредактируйте информацию об этих игроках, добавив их Discord.",
+            "⚠️ Необходимо выбрать хотя бы один турнир.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад к выбору", callback_data="register_team")
+            ]])
+        )
+        return PROFILE_MENU
+    
+    db = context.bot_data["db"]
+    
+    # Получаем информацию о выбранных турнирах
+    tournaments_info = []
+    for tournament_id in selected_tournaments:
+        tournament = db.get_tournament_by_id(tournament_id)
+        if tournament:
+            tournaments_info.append(tournament)
+    
+    # Формируем сообщение для подтверждения
+    message = (
+        "🏆 <b>Подтверждение регистрации на турниры</b>\n\n"
+        "Вы выбрали следующие турниры:\n\n"
+    )
+    
+    for tournament in tournaments_info:
+        message += f"• <b>{tournament['name']}</b>\n"
+        message += f"  Дата проведения: {tournament['event_date']}\n\n"
+    
+    message += "Вы уверены, что хотите зарегистрировать команду на эти турниры?"
+    
+    # Создаем клавиатуру для подтверждения
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Да, зарегистрировать", callback_data="complete_registration"),
+            InlineKeyboardButton("❌ Нет, отмена", callback_data=f"view_team_{team_id}")
+        ]
+    ]
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+    
+    return PROFILE_MENU
+
+async def complete_tournaments_registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Завершить процесс регистрации на выбранные турниры."""
+    query = update.callback_query
+    await query.answer()
+    
+    team_id = context.user_data.get("current_team_id")
+    selected_tournaments = context.user_data.get('selected_tournaments', set())
+    
+    if not team_id or not selected_tournaments:
+        await query.edit_message_text(
+            "❌ Произошла ошибка при регистрации. Попробуйте снова.",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 Вернуться к команде", callback_data=f"view_team_{team_id}")
             ]])
         )
         return PROFILE_MENU
     
-    # Создаем клавиатуру с турнирами
-    keyboard = []
-    for tournament in active_tournaments:
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{tournament['name']} ({tournament['event_date']})",
-                callback_data=f"register_for_tournament_{team_id}_{tournament['id']}"
-            )
-        ])
+    db = context.bot_data["db"]
     
-    # Добавляем кнопку "Отмена"
-    keyboard.append([
-        InlineKeyboardButton("❌ Отмена", callback_data=f"view_team_{team_id}")
-    ])
-    
-    await query.edit_message_text(
-        "🏆 <b>Выберите турнир для регистрации</b>\n\n"
-        "Доступные турниры:\n",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML"
-    )
-    
-    return PROFILE_MENU
+    try:
+        # Регистрируем команду на все выбранные турниры
+        for tournament_id in selected_tournaments:
+            db.register_team_for_tournament(team_id, tournament_id)
+        
+        # Получаем обновленную информацию о команде
+        team = db.get_team_by_id(team_id)
+        
+        # Формируем сообщение об успешной регистрации
+        message = "✅ <b>Регистрация успешно завершена!</b>\n\n"
+        message += "Команда зарегистрирована на следующие турниры:\n\n"
+        
+        for tournament in team['tournaments']:
+            message += f"• <b>{tournament['name']}</b>\n"
+            message += f"  Дата проведения: {tournament['event_date']}\n"
+            message += f"  Статус: {TEAM_STATUS.get(tournament['registration_status'], 'Неизвестно')}\n\n"
+        
+        message += "Ожидайте рассмотрения заявок администраторами турниров."
+        
+        # Создаем клавиатуру для возврата
+        keyboard = [[InlineKeyboardButton("🔙 К информации о команде", callback_data=f"view_team_{team_id}")]]
+        
+        await query.edit_message_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
+        )
+        
+        # Очищаем данные о выбранных турнирах
+        if 'selected_tournaments' in context.user_data:
+            del context.user_data['selected_tournaments']
+        
+        return PROFILE_MENU
+        
+    except Exception as e:
+        logger.error(f"Ошибка при регистрации на турниры: {e}")
+        
+        await query.edit_message_text(
+            f"❌ Произошла ошибка при регистрации: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Вернуться к команде", callback_data=f"view_team_{team_id}")
+            ]])
+        )
+        
+        return PROFILE_MENU
 
 async def confirm_tournament_registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Подтвердить регистрацию команды на выбранный турнир."""
@@ -2310,6 +2454,7 @@ async def handle_profile_action(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     data = query.data
     
+    # Обработка навигации по профилю
     if data == "profile_back":
         return await profile_menu(update, context)
     elif data == "profile_teams":
@@ -2317,28 +2462,36 @@ async def handle_profile_action(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "profile_create_team":
         return await start_create_team(update, context)
     elif data == "profile_check_status":
-        # Импортируем функцию проверки статуса
         from handlers.status import check_registration_status
-        # Вызовем её с переданным callback_query
         return await check_registration_status(update, context)
     elif data == "profile_main_menu":
         return await back_to_main_menu(update, context)
+    
+    # Обработка действий с командой
     elif data == "add_player":
         return await add_player_start(update, context)
     elif data == "edit_team_name":
         return await start_edit_team_name(update, context)
     elif data == "register_team":
         return await register_team_for_tournament(update, context)
+    elif data == "cancel_team":
+        return await cancel_team_registration(update, context)
+    
+    # Обработка выбора турниров и регистрации
+    elif data.startswith("select_tournament_"):
+        return await handle_tournament_selection(update, context)
+    elif data == "confirm_tournaments":
+        return await confirm_tournaments_registration(update, context)
+    elif data == "complete_registration":
+        return await complete_tournaments_registration(update, context)
     elif data.startswith("register_for_tournament_"):
         return await confirm_tournament_registration(update, context)
     elif data.startswith("confirm_register_anyway_"):
-        # Обработка кнопки "Продолжить регистрацию" для команд с неподписанными игроками
         return await complete_registration_anyway(update, context)
     elif data.startswith("confirm_register_"):
-        # Обычная регистрация команды
         return await complete_tournament_registration(update, context)
-    elif data == "cancel_team":
-        return await cancel_team_registration(update, context)
+    
+    # Обработка действий с игроками
     elif data.startswith("player_"):
         return await view_player(update, context)
     elif data.startswith("edit_player_nickname_"):
@@ -2351,12 +2504,14 @@ async def handle_profile_action(update: Update, context: ContextTypes.DEFAULT_TY
         return await confirm_delete_player(update, context)
     elif data.startswith("delete_player_confirm_"):
         return await process_delete_player(update, context)
+    
+    # Обработка подтверждений и отмены
     elif data.startswith("confirm_cancel_"):
         return await confirm_cancel_team(update, context)
     elif data.startswith("view_team_"):
         return await view_team(update, context)
     
-    # Добавляем отладочное сообщение для неопознанных callback_data
+    # Обработка неизвестных команд
     await query.answer(f"Неизвестная команда: {data}", show_alert=True)
     logger.warning(f"Неизвестная callback_data: {data}")
     return PROFILE_MENU
