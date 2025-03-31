@@ -71,90 +71,109 @@ async def remove_discord_role_from_player(discord_bot, server_id, role_id, playe
         logger.error(f"Ошибка при удалении роли Discord: {e}")
         return False
 
-async def process_team_roles(db, discord_bot, discord_server_id, discord_role_id, discord_captain_role_id, team_id, old_status, new_status):
-    """Обрабатывает изменение ролей для всех игроков команды при изменении статуса."""
-    # Если роль не указана, пропускаем обработку
-    if not discord_role_id:
-        logger.warning("ID роли Discord не указан. Пропускаем обработку ролей")
-        return True
-    
-    # Получаем информацию о команде
-    team = db.get_team_by_id(team_id)
-    if not team:
-        logger.error(f"Команда с ID {team_id} не найдена")
-        return False
-    
-    # Обрабатываем выдачу ролей при одобрении команды
-    if old_status != "approved" and new_status == "approved":
-        logger.info(f"Выдаем роли команде {team['team_name']} (ID: {team_id})")
-        for player in team["players"]:
-            # Проверяем наличие Discord ID
-            if player.get("discord_id"):
-                try:
-                    # Выдаем роль игрока
-                    await assign_discord_role_to_player(
-                        discord_bot, 
-                        discord_server_id, 
-                        discord_role_id, 
-                        player["discord_id"]
-                    )
-                    
-                    # Если игрок капитан, выдаем дополнительную роль капитана
-                    if player.get("is_captain") and discord_captain_role_id:
-                        await assign_discord_role_to_player(
-                            discord_bot, 
-                            discord_server_id, 
-                            discord_captain_role_id, 
-                            player["discord_id"]
-                        )
-                except Exception as e:
-                    logger.error(f"Ошибка при выдаче роли игроку {player['nickname']}: {e}")
-                    return False
-        return True
-    
-    # Обрабатываем удаление ролей при изменении статуса с approved на draft/rejected
-    elif old_status == "approved" and (new_status == "draft" or new_status == "rejected"):
-        logger.info(f"Удаляем роли у команды {team['team_name']} (ID: {team_id})")
-        
-        # Флаг для отслеживания успешности снятия ролей
-        all_roles_removed = True
-        
-        for player in team["players"]:
-            # Проверяем наличие Discord ID
-            if player.get("discord_id"):
-                try:
-                    # Удаляем роль игрока
-                    result_player = await remove_discord_role_from_player(
-                        discord_bot, 
-                        discord_server_id, 
-                        discord_role_id, 
-                        player["discord_id"]
-                    )
-                    
-                    # Если игрок капитан, удаляем дополнительную роль капитана
-                    if player.get("is_captain") and discord_captain_role_id:
-                        result_captain = await remove_discord_role_from_player(
-                            discord_bot, 
-                            discord_server_id, 
-                            discord_captain_role_id, 
-                            player["discord_id"]
-                        )
-                        
-                        # Если не удалось снять роль капитана
-                        if not result_captain:
-                            logger.warning(f"Не удалось снять роль капитана у игрока {player['nickname']}")
-                            all_roles_removed = False
-                    
-                    # Если не удалось снять роль игрока
-                    if not result_player:
-                        logger.warning(f"Не удалось снять роль у игрока {player['nickname']}")
-                        all_roles_removed = False
-                
-                except Exception as e:
-                    logger.error(f"Ошибка при снятии роли с игрока {player['nickname']}: {e}")
-                    all_roles_removed = False
-        
-        return all_roles_removed
+async def process_team_roles(db, discord_bot, discord_server_id, discord_role_id, discord_captain_role_id, team_id, old_status, new_status, tournament_id=None):
+   """
+   Обрабатывает изменение ролей для всех игроков команды при изменении статуса.
+   
+   Args:
+       db: База данных
+       discord_bot: Discord бот
+       discord_server_id: ID сервера Discord
+       discord_role_id: ID роли игрока
+       discord_captain_role_id: ID роли капитана
+       team_id: ID команды
+       old_status: Старый статус
+       new_status: Новый статус
+       tournament_id: ID турнира (опционально)
+   """
+   if not discord_role_id:
+       logger.warning("ID роли Discord не указан. Пропускаем обработку ролей")
+       return True
 
-    # Если не попали ни в один сценарий
-    return False
+   team = db.get_team_by_id(team_id)
+   if not team:
+       logger.error(f"Команда с ID {team_id} не найдена")
+       return False
+
+   # Проверяем статусы во всех турнирах
+   has_other_approved = False
+   if tournament_id:
+       for t in team.get("tournaments", []):
+           if t["id"] != tournament_id and t["registration_status"] == "approved":
+               has_other_approved = True
+               break
+
+   # Обрабатываем выдачу ролей при одобрении команды
+   if old_status != "approved" and new_status == "approved":
+       logger.info(f"Выдаем роли команде {team['team_name']} (ID: {team_id})")
+       for player in team["players"]:
+           if player.get("discord_id"):
+               try:
+                   # Выдаем роль игрока только если у команды нет других одобренных турниров
+                   if not has_other_approved:
+                       await assign_discord_role_to_player(
+                           discord_bot, 
+                           discord_server_id, 
+                           discord_role_id, 
+                           player["discord_id"]
+                       )
+                   
+                   # Выдаем роль капитана, если это капитан и указан ID роли капитана
+                   if player.get("is_captain") and discord_captain_role_id and not has_other_approved:
+                       await assign_discord_role_to_player(
+                           discord_bot, 
+                           discord_server_id, 
+                           discord_captain_role_id, 
+                           player["discord_id"]
+                       )
+               except Exception as e:
+                   logger.error(f"Ошибка при выдаче роли игроку {player['nickname']}: {e}")
+                   return False
+       return True
+   
+   # Обрабатываем удаление ролей
+   elif old_status == "approved" and (new_status == "draft" or new_status == "rejected"):
+       # Удаляем роли только если нет других одобренных турниров
+       if not has_other_approved:
+           logger.info(f"Удаляем роли у команды {team['team_name']} (ID: {team_id})")
+           all_roles_removed = True
+           
+           for player in team["players"]:
+               if player.get("discord_id"):
+                   try:
+                       # Удаляем роль игрока
+                       result_player = await remove_discord_role_from_player(
+                           discord_bot, 
+                           discord_server_id, 
+                           discord_role_id, 
+                           player["discord_id"]
+                       )
+                       
+                       # Удаляем роль капитана, если это капитан
+                       if player.get("is_captain") and discord_captain_role_id:
+                           result_captain = await remove_discord_role_from_player(
+                               discord_bot, 
+                               discord_server_id, 
+                               discord_captain_role_id, 
+                               player["discord_id"]
+                           )
+                           
+                           if not result_captain:
+                               logger.warning(f"Не удалось снять роль капитана у игрока {player['nickname']}")
+                               all_roles_removed = False
+                       
+                       if not result_player:
+                           logger.warning(f"Не удалось снять роль у игрока {player['nickname']}")
+                           all_roles_removed = False
+                           
+                   except Exception as e:
+                       logger.error(f"Ошибка при снятии роли с игрока {player['nickname']}: {e}")
+                       all_roles_removed = False
+                       
+           return all_roles_removed
+       else:
+           # Если есть другие одобренные турниры, оставляем роли
+           logger.info(f"Роли сохранены для команды {team['team_name']} (ID: {team_id}), так как есть другие одобренные турниры")
+           return True
+
+   return True
